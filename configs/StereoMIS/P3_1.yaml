@@ -11,10 +11,10 @@ cam:
   stereo_baseline: 2420.552
 
 data:
-  input_folder: StereoMIS/P3_1
+  input_folder: /home/nan/Desktop/datasets/StereoMIS/P3_1
   output: output/stereoMIS/P3_1_explicit
   start: 0 
   stop: 200
   step: 1
 
-    
+  

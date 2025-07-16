@@ -1,6 +1,6 @@
 import torch
 from torch import nn
-from src.utils.sh_utils import RGB2SH
+from src.utils.sh_utils import RGB2SH, SH2RGB
 from simple_knn._C import distCUDA2
 from src.utils.general_utils import strip_symmetric, build_scaling_rotation, build_inv_cov, inverse_sigmoid, build_rotation
 from src.scene.deformation import ExplicitDeformation, ExplicitSparseDeformation
@@ -91,6 +91,18 @@ class GaussianModel(nn.Module):
     
     def get_covariance(self, scaling_modifier = 1):
         return self.covariance_activation(self.get_scaling, scaling_modifier, self._rotation)
+
+    @property
+    def get_color(self):
+        """
+        Get RGB color of Gaussians from SH features (degree 0).
+        """
+        # Extract SH degree-0 (DC) term from SH features (first channel of _features_dc)
+        # print("shape of features_dc:", self._features_dc.shape)
+        dc_component = self._features_dc[:, 0, :]  # shape: (N, 3)
+        rgb = SH2RGB(dc_component)  # (N, 3), float32 in [0, 1]
+        # print("Color range:", rgb.min().item(), rgb.max().item(), rgb.mean().item(), rgb.shape)
+        return rgb.clamp(0, 1)
 
     def enable_spherical_harmonics(self):
         self.active_sh_degree = 1

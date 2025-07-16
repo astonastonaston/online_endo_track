@@ -27,6 +27,8 @@ class SceneOptimizer():
         self.scale = cfg['scale']
         self.device = cfg['device']
         self.output = cfg['data']['output']
+        self.export_num_points = None  # fixed number of Gaussians to export
+        self.export_mode = args.export_mode 
 
         self.frame_reader = StereoMIS(cfg, args, scale=self.scale)
         self.n_img = len(self.frame_reader)
@@ -112,6 +114,40 @@ class SceneOptimizer():
                     self.net.optimizer.step()
                     self.net.optimizer.zero_grad(set_to_none=True)
 
+    def export_model_state(self, frame_id):
+        export_dir = os.path.join(self.output, "exports")
+        os.makedirs(export_dir, exist_ok=True)
+
+        if self.export_mode == "track":
+            N = self.export_num_points
+        else:
+            N = self.net.get_xyz.shape[0]
+
+        xyz = self.net.get_xyz.detach().cpu().numpy()[:N]
+        if hasattr(self.net, "_deformation") and hasattr(self.net._deformation, "get_deformed_means"):
+            deformed_xyz = self.net._deformation.get_deformed_means(self.net.get_xyz).detach().cpu().numpy()[:N]
+        else:
+            deformed_xyz = xyz
+
+        opacity = self.net.get_opacity.detach().cpu().numpy()[:N]
+        features = self.net.get_features.detach().cpu().numpy()[:N]
+        rgb = self.net.get_color.detach().cpu().numpy()[:N]
+        covs = self.net.get_covariance().detach().cpu().numpy()[:N]
+
+        out_path = os.path.join(export_dir, f"frame_{frame_id:05d}.npz")
+        np.savez_compressed(out_path,
+                            xyz=xyz,
+                            deformed_xyz=deformed_xyz,
+                            opacity=opacity,
+                            covs=covs,
+                            rgb=rgb)
+
+
+    def save_final_model(self):
+        save_path = os.path.join(self.output, "gaussian_model_final.pth")
+        torch.save(self.net.state_dict(), save_path)
+        print(f"Saved final model to {save_path}")
+
     def run(self):
         torch.cuda.empty_cache()
         pt_track_stats = {"pred_2d": []}
@@ -128,8 +164,10 @@ class SceneOptimizer():
 
             if ids.item() == 0:
                 self.net.create_from_pcd(gt_color, gt_depth, gt_c2w, self.camera, tool_mask, semantics=semantics)
+                self.export_num_points = self.net.get_xyz.shape[0]
                 self.net.training_setup(self.cfg['training'])
                 self.fit(frame, iters=self.cfg['training']['iters_first'], incremental=False)
+                self.export_model_state(ids.item())
             else:
                 if ids.item() == 1:
                     if self.cfg['training']['grad_weighing']:
@@ -154,9 +192,12 @@ class SceneOptimizer():
                         self.net._deformation.init_from_flow(deformation.clamp(-0.01, 0.01), weights)
 
                 self.fit(frame, iters=self.cfg['training']['iters'], incremental=True)
+                self.export_model_state(ids.item())
             self.last_frame = gt_color.detach()
 
             # eval
+            # print("shape of model:", self.net.get_xyz.shape[0])
+            # print("shape of ", gt_color.shape, gt_depth.shape, tool_mask.shape if tool_mask is not None else None)
             with torch.no_grad():
                 log_dict = {}
                 if self.pt_tracker is not None:
@@ -188,6 +229,7 @@ class SceneOptimizer():
             wandb.summary['survival_2D'] = surv_2d(pred_2d, gt_2d, valid, H, W)
         with open(os.path.join(self.output, 'tracked.pckl'), 'wb') as f:
             pickle.dump(pt_track_stats, f)
+        self.save_final_model()
         print('...finished')
 
 
@@ -212,7 +254,8 @@ if __name__ == "__main__":
     parser.add_argument('--log', type=str)
     parser.add_argument('--log_group', type=str, default='default')
     parser.add_argument('--debug', action="store_true")
-
+    parser.add_argument('--export_mode', choices=['track', 'all'], default='track', help="Export mode for Gaussian points")
+    
     args = parser.parse_args()
     cfg = load_config(args.config, 'configs/base.yaml')
     cfg['data']['output'] = args.output if args.output else cfg['data']['output']

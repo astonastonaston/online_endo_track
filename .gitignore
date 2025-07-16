@@ -1,0 +1,12 @@
+output
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.db
+*.so
+wandb/
+build/
+*.egg-info/
+useless/
+
