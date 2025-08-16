@@ -12,7 +12,7 @@ cam:
 
 data:
   input_folder: StereoMIS/H3_1
-  output: output/stereoMIS/H3_1_explicit
+  output: output/stereoMIS/H3_1_explicit_tool
   start: 0 
   stop: 200
   step: 1

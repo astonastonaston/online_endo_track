@@ -15,14 +15,17 @@ cam_widefield:
 
 
 cam:
+  # znear: 0
   znear: 0.01
   zfar: 3.0
   crop_edge: 0
-  point_src_light_model: True
+  point_src_light_model: False
+  # point_src_light_model: True
 
 training:
   spherical_harmonics: True
-  optical_flow_init: True
+  optical_flow_init: False
+  # optical_flow_init: True
   grad_weighing: True
   add_points: True
   iters: 100

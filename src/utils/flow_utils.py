@@ -75,3 +75,4 @@ def get_depth_from_raft(raft, img1, img2, baseline):
         cv2.bilateralFilter(depth.cpu().numpy().squeeze(), d=-1, sigmaColor=2.5, sigmaSpace=2.5)).cuda().unsqueeze(0)
     valid = flow[:, 1].abs() < 1.5
     return depth, valid
+

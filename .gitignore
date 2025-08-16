@@ -5,6 +5,7 @@ __pycache__/
 *.pyd
 *.db
 *.so
+*.out
 wandb/
 build/
 *.egg-info/

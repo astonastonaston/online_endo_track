@@ -1,5 +1,6 @@
 import numpy as np
 
+merge_label = True
 
 LABELS = [
     {
@@ -13,7 +14,7 @@ LABELS = [
         "color" : [0,255,0]
     },
     {
-        "name" : "instrument-clasper",
+        "name" : "instrument-clasper", # the tool tip!
         "classid" : 2,
         "color" : [0,255,255]
     },
@@ -113,7 +114,7 @@ LABELS = [
         "color": [47, 42, 31]
     },
     {
-        "name": "liver",
+        "name": "liver", # the pink liver
         "classid": 22,
         "color": [224, 3, 117]
     },
@@ -138,7 +139,7 @@ LABELS = [
         "color" : [51,127,228]
     },
     {
-        "name": "gallbladder",
+        "name": "gallbladder", # the purple gallbladder
         "classid": 27,
         "color": [105, 38, 209]
     },
@@ -173,10 +174,18 @@ LABELS = [
         "color" : [190,248,146]
     },
     {
-        "name" : "plastic-tube",
+        "name" : "plastic-tube", # the white mountain
         "classid" : 34,
         "color" : [82,136,253]
     },
+#     >>> import cv2
+# >>> a=cv2.imread("/home/nan/Desktop/datasets/StereoMIS/P3_1/semantic_predictions/008707l.png")
+# >>> a[511, 320]
+# array([253, 136,  82], dtype=uint8)
+# >>> a[0, 320]
+# array([209,  38, 105], dtype=uint8)
+# >>> a[511, 0]
+# array([117,   3, 224], dtype=uint8)
     {
         "name" : "misc-device",
         "classid" : 35,
@@ -246,7 +255,8 @@ class SemanticDecoder():
         rgblabel[~np.isin(rgblabel, self.decode_k1D)] = 0
         decoded_label = self.decode_v[self.decode_sidx[np.searchsorted(self.decode_k1D, rgblabel,
                                                                         sorter=self.decode_sidx)]].astype(np.uint8)
-        decoded_label = self.mergelabels(decoded_label)
+        if merge_label:
+            decoded_label = self.mergelabels(decoded_label)
         multi_channel_label = np.zeros((*decoded_label.shape, self.n_classes))
         for i in range(self.n_classes):
             multi_channel_label[..., i] = 1.0*(decoded_label == i)
@@ -282,3 +292,6 @@ class SemanticDecoder():
         mapped_label[orig_label == 27] = 5  # gallbladder
         mapped_label[orig_label == 34] = 6  # plastic tube
         return mapped_label
+    
+
+    

@@ -35,3 +35,5 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     save_all_gaussians_to_pkl(args.npz_dir, args.output)
+
+# python save_all_gaussians_to_pkl.py --npz_dir ../output/stereoMIS/P3_1_explicit_tissue_only/exports --output ../output/stereoMIS/P3_1_explicit_tissue_only/exports/all_tissue_only_gaussians.pkl 

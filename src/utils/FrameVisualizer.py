@@ -10,6 +10,8 @@ from src.utils.renderer import render
 from src.utils.camera import Camera
 from src.utils.semantic_utils import SemanticDecoder
 
+plot_delta_p_map = True
+
 
 class FrameVisualizer(object):
     """
@@ -23,9 +25,11 @@ class FrameVisualizer(object):
         self.outmap = os.path.join(outpath, 'mapping')
         self.outrack = os.path.join(outpath, 'tracking')
         self.outsem = os.path.join(outpath, 'semantic')
+        self.outdeltapmap = os.path.join(outpath, 'deltap')
         os.makedirs(self.outmap, exist_ok=True)
         os.makedirs(self.outrack, exist_ok=True)
         os.makedirs(self.outsem , exist_ok=True)
+        os.makedirs(self.outdeltapmap , exist_ok=True)
         self.camera = Camera(cfg['cam'])
         self.widefield_camera = Camera(cfg['cam_widefield'])
         self.decoder = SemanticDecoder()
@@ -39,11 +43,18 @@ class FrameVisualizer(object):
 
         """
         self.camera.set_c2w(c2w)
-        render_pkg = render(self.camera, self.net, self.background, deform=True)
-        self.plot_mapping(render_pkg['depth'], render_pkg['render'], gt_depth, gt_color)
-        outmap = os.path.join(self.outmap,f'{idx:05d}.jpg')
-        plt.savefig(outmap, bbox_inches='tight', pad_inches=0.2, dpi=300)
-        plt.close()
+        render_pkg = render(self.camera, self.net, self.background, deform=True, render_deformation=True)
+        
+        if not plot_delta_p_map:
+            self.plot_mapping(render_pkg['depth'], render_pkg['render'], gt_depth, gt_color)
+            outmap = os.path.join(self.outmap,f'{idx:05d}.jpg')
+            plt.savefig(outmap, bbox_inches='tight', pad_inches=0.2, dpi=300)
+            plt.close()
+        else:
+            self.plot_mapping_delta_p(render_pkg['depth'], render_pkg['render'], gt_depth, gt_color)
+            outmap = os.path.join(self.outdeltapmap,f'{idx:05d}.jpg')
+            plt.savefig(outmap, bbox_inches='tight', pad_inches=0.2, dpi=300)
+            plt.close()
 
         img_sem = self.plot_semantics(c2w)
         outsem = os.path.join(self.outsem,f'{idx:05d}.jpg')
@@ -57,6 +68,50 @@ class FrameVisualizer(object):
             outrack = None
         return outmap, outsem, outrack
 
+    def plot_mapping_delta_p(self, depth, color, gt_depth, gt_color):
+        gt_depth_np = gt_depth.squeeze(0).cpu().numpy()
+        gt_color_np = gt_color.squeeze(0).cpu().numpy()
+        depth_np = depth.squeeze(0).cpu().numpy()
+        color_np = color.squeeze(0).cpu().numpy()
+        depth_residual = np.abs(gt_depth_np - depth_np)
+        depth_residual[gt_depth_np == 0.0] = 0.0
+        color_residual = np.abs(gt_color_np - color_np)
+        color_residual[gt_depth_np == 0.0] = 0.0
+
+        fig, axs = plt.subplots(1, 3)
+        # max_depth = np.max(gt_depth_np)
+
+        # axs[0, 0].imshow(gt_depth_np, vmin=0, vmax=max_depth)
+        # axs[0, 0].set_title('Input Depth')
+        # axs[0, 0].set_xticks([])
+        # axs[0, 0].set_yticks([])
+        # axs[0, 1].imshow(depth_np, vmin=0, vmax=max_depth)
+        # axs[0, 1].set_title('Generated Depth')
+        # axs[0, 1].set_xticks([])
+        # axs[0, 1].set_yticks([])
+        # axs[0, 2].imshow(depth_residual, vmin=0, vmax=max_depth)
+        # axs[0, 2].set_title('Depth Residual')
+        # axs[0, 2].set_xticks([])
+        # axs[0, 2].set_yticks([])
+        gt_color_np = np.clip(gt_color_np, 0, 1)
+        color_np = np.clip(color_np, 0, 1)
+        color_residual = np.clip(color_residual, 0, 1)
+        axs[0].imshow(gt_color_np)
+        axs[0].set_title('Input RGB')
+        axs[0].set_xticks([])
+        axs[0].set_yticks([])
+        axs[1].imshow(color_np)
+        axs[1].set_title('|Δp| RGB')
+        axs[1].set_xticks([])
+        axs[1].set_yticks([])
+        axs[2].imshow(color_residual)
+        axs[2].set_title('|Δp| Overlay')
+        axs[2].set_xticks([])
+        axs[2].set_yticks([])
+        plt.subplots_adjust(wspace=0, hspace=0)
+        plt.tight_layout()
+        return fig, axs
+    
     def plot_mapping(self, depth, color, gt_depth, gt_color):
         gt_depth_np = gt_depth.squeeze(0).cpu().numpy()
         gt_color_np = gt_color.squeeze(0).cpu().numpy()

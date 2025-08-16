@@ -32,3 +32,4 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     inspect_pkl_structure(args.file, args.verbose)
+

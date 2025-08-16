@@ -14,9 +14,9 @@ import math
 from diff_gaussian_rasterization import GaussianRasterizationSettings, GaussianRasterizer
 from src.scene.gaussian_model import GaussianModel
 from src.utils.sh_utils import RGB2SH
+import pdb
 
-
-def render(viewpoint_camera, pc : GaussianModel, bg_color : torch.Tensor, scaling_modifier = 1.0, override_color = None, deform=True, render_deformation=False):
+def render(viewpoint_camera, pc : GaussianModel, bg_color : torch.Tensor, scaling_modifier = 1.0, override_color = None, deform=True, render_deformation=False, render_motion=False, motion_flow=None):
     """
     Render the scene. 
     
@@ -31,7 +31,6 @@ def render(viewpoint_camera, pc : GaussianModel, bg_color : torch.Tensor, scalin
         pass
 
     # Set up rasterization configuration
-    
     tanfovx = math.tan(viewpoint_camera.FoVx * 0.5)
     tanfovy = math.tan(viewpoint_camera.FoVy * 0.5)
     raster_settings = GaussianRasterizationSettings(
@@ -55,8 +54,19 @@ def render(viewpoint_camera, pc : GaussianModel, bg_color : torch.Tensor, scalin
         # set deformation as color
         mean_def = pc._deformation.get_mean_def(pc.get_xyz).abs()
         mean_def = mean_def / (torch.quantile(mean_def, 0.99)+1e-12)
-        shs = RGB2SH(mean_def[:, None])
+        # print(mean_def.shape)
+        mean_def_updated = mean_def[:, None]
+        # print(mean_def_updated.shape)
+        shs = RGB2SH(mean_def_updated)
         opacity = opacity.clamp(0, 0.9)
+    elif render_motion:
+        # set motion as color
+        # print(motion_flow.shape)
+        motion_flow_updated = motion_flow[:, None]
+        motion_flow_updated = motion_flow_updated.abs()
+        shs = RGB2SH(motion_flow_updated)
+        opacity = opacity.clamp(0, 0.9)
+    
     means2D = screenspace_points
 
     # Rasterize visible Gaussians to image, obtain their radii (on screen). 
@@ -70,6 +80,9 @@ def render(viewpoint_camera, pc : GaussianModel, bg_color : torch.Tensor, scalin
         rotations = rots,
         cov3D_precomp = None,
         semantics = semantics)
+    
+    # pdb.set_trace()
+
     rendered_image = rendered_image.permute(1, 2, 0)
     depth = depth.squeeze(0)
     # spotlight light source model

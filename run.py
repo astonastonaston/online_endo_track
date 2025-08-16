@@ -1,7 +1,10 @@
 import numpy as np
 import os
+import sys
 import torch
 import wandb
+import pdb
+import imageio
 from torchvision.models.optical_flow import raft_large, Raft_Large_Weights
 from scipy.spatial import KDTree
 from tqdm import tqdm
@@ -17,6 +20,19 @@ from src.utils.loss_utils import l1_loss
 from src.utils.renderer import render
 from src.scene.gaussian_model import GaussianModel
 
+def load_pickle(file_path):
+    try:
+        with open(file_path, 'rb') as f:
+            data = pickle.load(f)
+        return data
+    except Exception as e:
+        print(f"Error loading pickle file: {e}")
+        sys.exit(1)
+
+def save_depth_image(depth_tensor, path):
+    depth_np = depth_tensor.squeeze().cpu().numpy()
+    depth_norm = (depth_np / depth_np.max() * 65535).astype(np.uint16)
+    imageio.imwrite(path, depth_norm)
 
 class SceneOptimizer():
     def __init__(self, cfg, args):
@@ -27,8 +43,10 @@ class SceneOptimizer():
         self.scale = cfg['scale']
         self.device = cfg['device']
         self.output = cfg['data']['output']
-        self.export_num_points = None  # fixed number of Gaussians to export
-        self.export_mode = args.export_mode 
+        self.export_num_points = None
+        self.export_mode = args.export_mode
+        self.track_ids = args.track_ids
+        # self.track_tool = args.track_tool
 
         self.frame_reader = StereoMIS(cfg, args, scale=self.scale)
         self.n_img = len(self.frame_reader)
@@ -66,11 +84,11 @@ class SceneOptimizer():
             self.total_iters += 1
             self.net.train(iter == 1)
             render_pkg = render(self.camera, self.net, self.background, deform=incremental)
+            
             self.net.eval()
             color = render_pkg['render'][None, ...]
             depth = render_pkg['depth'][None, ...]
 
-            # Loss
             Ll1 = self.cfg['training']['w_color']*l1_loss(color[tool_mask], gt_color[tool_mask])
             Ll1_depth = self.cfg['training']['w_depth']*l1_loss(depth[tool_mask]/self.scale, gt_depth[tool_mask]/self.scale)
             loss = Ll1 + Ll1_depth
@@ -84,7 +102,6 @@ class SceneOptimizer():
             viewspace_point_tensor_grad = torch.zeros_like(render_pkg["viewspace_points"])
             viewspace_point_tensor_grad += render_pkg["viewspace_points"].grad
 
-            ########### Logging & Evaluation ###################
             with torch.no_grad():
                 av_loss[0] += Ll1.item()
                 av_loss[1] += Ll1_depth.item()
@@ -105,11 +122,9 @@ class SceneOptimizer():
 
                 self.net.add_densification_stats(viewspace_point_tensor_grad, render_pkg["visibility_filter"])
                 if not incremental:
-                    # Densification
                     if iter > self.cfg["training"]["densify_from_iter"] and iter % self.cfg["training"]["densification_interval"] == 0:
                         self.net.densify(self.cfg["training"]["densify_grad_threshold"])
 
-                # Optimizer step
                 if iter < iters:
                     self.net.optimizer.step()
                     self.net.optimizer.zero_grad(set_to_none=True)
@@ -142,7 +157,6 @@ class SceneOptimizer():
                             covs=covs,
                             rgb=rgb)
 
-
     def save_final_model(self):
         save_path = os.path.join(self.output, "gaussian_model_final.pth")
         torch.save(self.net.state_dict(), save_path)
@@ -151,90 +165,127 @@ class SceneOptimizer():
     def run(self):
         torch.cuda.empty_cache()
         pt_track_stats = {"pred_2d": []}
+        depth_dir = os.path.join(self.output, 'depth_maps')
+        os.makedirs(depth_dir, exist_ok=True)
+
+
+        file_path = "../gaussians_StereoMIS/exports/all_traj_gaussians_and_flows.pkl"
+        data = load_pickle(file_path)
 
         for ids, gt_color, gt_color_r, gt_c2w, tool_mask, semantics in tqdm(self.frame_loader, total=self.n_img):
             gt_color = gt_color.cuda()
             gt_color_r = gt_color_r.cuda()
             gt_c2w = gt_c2w.cuda()
-            tool_mask = tool_mask.cuda() if tool_mask is not None else None
+            motion_flows = torch.from_numpy(data[ids]["motion_flows"])
+            motion_flows = motion_flows.cuda()
+            if args.track_all:
+                tool_mask = torch.ones_like(tool_mask).bool().cuda()
+            elif args.track_ids is not None and semantics is not None:
+                # Create mask from semantic segmentation map
+                # print(f"Tracking semantic IDs: {args.track_ids}")
+                # print(tool_mask.shape, semantics.shape)
+                tool_mask = torch.zeros_like(tool_mask, dtype=torch.bool).cuda()
+                for track_id in args.track_ids:
+                    # print(f"Tracking semantic: {semantics.shape}")
+                    assert track_id < semantics.shape[-1], f"Track ID {track_id} exceeds semantic channels {semantics.shape[-1]}"
+                    track_mask = semantics[..., track_id] == 1
+                    track_mask = track_mask.cuda()
+                    tool_mask |= track_mask  
+            else:
+                tool_mask = tool_mask.cuda() if tool_mask is not None else None
             semantics = semantics.float().cuda() if semantics is not None else None
+
             with torch.no_grad():
                 gt_depth, flow_valid = get_depth_from_raft(self.raft, gt_color, gt_color_r, self.baseline)
+
+            frame_idx = ids.item()
+            save_depth_image(gt_depth, os.path.join(depth_dir, f"{frame_idx:05d}.png"))
             frame = ids, gt_color, gt_depth, gt_c2w, tool_mask
 
-            if ids.item() == 0:
+            if frame_idx == 0:
                 self.net.create_from_pcd(gt_color, gt_depth, gt_c2w, self.camera, tool_mask, semantics=semantics)
                 self.export_num_points = self.net.get_xyz.shape[0]
                 self.net.training_setup(self.cfg['training'])
                 self.fit(frame, iters=self.cfg['training']['iters_first'], incremental=False)
-                self.export_model_state(ids.item())
+                self.export_model_state(frame_idx)
             else:
-                if ids.item() == 1:
-                    if self.cfg['training']['grad_weighing']:
-                        self.net.enable_grad_weighing(True)
+                if frame_idx == 1 and self.cfg['training']['grad_weighing']:
+                    self.net.enable_grad_weighing(True)
 
                 with torch.no_grad():
-                    # add new points
                     self.camera.set_c2w(gt_c2w)
-                    render_pkg = render(self.camera, self.net, self.background, deform=True)
-                    mask = render_pkg['alpha'][None,...,None].squeeze(-1) < 0.95
+                    # render_pkg = render(self.camera, self.net, self.background, deform=True, render_motion=False)
+                    # print(f"frame id {ids}")
+                    render_pkg = render(self.camera, self.net, self.background, deform=True, render_motion=True, motion_flow=motion_flows)
+                    mask = render_pkg['alpha'][None, ..., None].squeeze(-1) < 0.95
                     mask &= tool_mask
-                    self.net.add_from_pcd(gt_color, gt_depth, gt_c2w, self.camera, mask, semantics=semantics) if self.cfg['training']['add_points'] else 0.0
+                    if self.cfg['training']['add_points']:
+                        self.net.add_from_pcd(gt_color, gt_depth, gt_c2w, self.camera, mask, semantics=semantics)
 
-                    # optical flow init
                     if self.cfg['training']['optical_flow_init']:
-                        scene_flow, anchor_pts, valid = get_scene_flow(self.raft, render_pkg['render'][None,...], gt_color, render_pkg['depth'][None,...],gt_depth, tool_mask, self.camera)
+                        scene_flow, anchor_pts, valid = get_scene_flow(
+                            self.raft, render_pkg['render'][None, ...], gt_color,
+                            render_pkg['depth'][None, ...], gt_depth, tool_mask, self.camera
+                        )
                         valid &= tool_mask.squeeze(0) & flow_valid.squeeze(0)
                         tree = KDTree(anchor_pts[valid].cpu().numpy())
-                        neighbour_dists, neighbours = tree.query(self.net._deformation.get_deformed_means(self.net.get_xyz).cpu().numpy(), k=3)#, eps=0.1)
-                        weights = torch.exp(-50.0*(torch.from_numpy(neighbour_dists).cuda()))
+                        neighbour_dists, neighbours = tree.query(
+                            self.net._deformation.get_deformed_means(self.net.get_xyz).cpu().numpy(), k=3
+                        )
+                        weights = torch.exp(-50.0 * torch.from_numpy(neighbour_dists).cuda())
+                        # if ids==69:
+                        #     pdb.set_trace()
+                        
+                        # print("scene_flow", scene_flow.shape)
+                        # print("valid", valid.shape, torch.sum(valid))
+                        # print("neighbours", neighbours.shape)
                         deformation = scene_flow[valid][torch.from_numpy(neighbours).cuda()]
                         self.net._deformation.init_from_flow(deformation.clamp(-0.01, 0.01), weights)
 
                 self.fit(frame, iters=self.cfg['training']['iters'], incremental=True)
-                self.export_model_state(ids.item())
+                self.export_model_state(frame_idx)
+
             self.last_frame = gt_color.detach()
 
-            # eval
-            # print("shape of model:", self.net.get_xyz.shape[0])
-            # print("shape of ", gt_color.shape, gt_depth.shape, tool_mask.shape if tool_mask is not None else None)
             with torch.no_grad():
                 log_dict = {}
                 if self.pt_tracker is not None:
-                        if not self.pt_tracker.is_initialized():
-                            self.pt_tracker.init_tracking_points(gt_c2w)
-                        pts_3d_gt, pts_3d, pts_2d, l2_3d, l2_2d, pts_2d_gt = self.pt_tracker.eval(gt_c2w, ids.item())
-                        pt_track_stats["pred_2d"].append(pts_2d.cpu().numpy())
-                        log_dict.update({'pt_track_l2_2d': l2_2d, 'frame': ids[0].item()})
+                    if not self.pt_tracker.is_initialized():
+                        self.pt_tracker.init_tracking_points(gt_c2w)
+                    pts_3d_gt, pts_3d, pts_2d, l2_3d, l2_2d, pts_2d_gt = self.pt_tracker.eval(gt_c2w, frame_idx)
+                    pt_track_stats["pred_2d"].append(pts_2d.cpu().numpy())
+                    log_dict.update({'pt_track_l2_2d': l2_2d, 'frame': frame_idx})
                 else:
                     pts_2d, pts_2d_gt = None, None
-                if self.visualize:
 
-                    outmap, outsem, outrack = self.visualizer.save_imgs(ids.item(), gt_depth, gt_color,
-                                                                        gt_c2w, pts_2d, pts_2d_gt)
+                if self.visualize:
+                    outmap, outsem, outrack = self.visualizer.save_imgs(
+                        frame_idx, gt_depth, gt_color, gt_c2w, pts_2d, pts_2d_gt
+                    )
                     if self.log:
-                        log_dict.update({'mapping': wandb.Image(outmap),
-                                         'tracking': wandb.Image(outrack) if outrack is not None else None,
-                                         'semantic': wandb.Image(outsem)})
+                        log_dict.update({
+                            'mapping': wandb.Image(outmap),
+                            'tracking': wandb.Image(outrack) if outrack is not None else None,
+                            'semantic': wandb.Image(outsem)
+                        })
                 if self.log:
                     wandb.log(log_dict)
 
         if self.log:
-            # eval point tracking
             gt_2d, valid = self.pt_tracker.get_gt_2d_pts()
             pred_2d = np.stack(pt_track_stats["pred_2d"], axis=1)
             H, W = self.camera.get_params()[:2]
             wandb.summary['MTE_2D'] = mte(pred_2d, gt_2d, valid)
             wandb.summary['delta_2D'] = delta_2d(pred_2d, gt_2d, valid, H, W)
             wandb.summary['survival_2D'] = surv_2d(pred_2d, gt_2d, valid, H, W)
+
         with open(os.path.join(self.output, 'tracked.pckl'), 'wb') as f:
             pickle.dump(pt_track_stats, f)
+
         self.save_final_model()
         print('...finished')
 
-
 if __name__ == "__main__":
-    # Set up command line argument parser
     from src.config import load_config
     import random
 
@@ -245,20 +296,32 @@ if __name__ == "__main__":
     torch.cuda.empty_cache()
     parser = ArgumentParser(description="Training script parameters")
     parser.add_argument('config', type=str)
-    parser.add_argument('--input_folder', type=str,
-                        help='input folder, this have higher priority, can overwrite the one in config file')
-    parser.add_argument('--output', type=str,
-                        help='output folder, this have higher priority, can overwrite the one in config file')
+    parser.add_argument('--input_folder', type=str)
+    parser.add_argument('--output', type=str)
     parser.add_argument('--visualize', action="store_true")
     parser.add_argument('--log_freq', type=int, default=10)
     parser.add_argument('--log', type=str)
     parser.add_argument('--log_group', type=str, default='default')
     parser.add_argument('--debug', action="store_true")
-    parser.add_argument('--export_mode', choices=['track', 'all'], default='track', help="Export mode for Gaussian points")
-    
+    parser.add_argument('--export_mode', choices=['track', 'all'], default='track')
+    parser.add_argument('--track_all', action="store_true", help="Track both tool and tissue (full mask)")
+    parser.add_argument('--track_ids', type=int, nargs='+', default=None,
+                        help="List of semantic segmentation IDs to track (e.g., --track_ids 1 2)")
+
     args = parser.parse_args()
     cfg = load_config(args.config, 'configs/base.yaml')
     cfg['data']['output'] = args.output if args.output else cfg['data']['output']
 
     trainer = SceneOptimizer(cfg, args)
     trainer.run()
+
+# python run.py configs/StereoMIS/P3_1.yaml --log P3_1 --visualize
+# python run.py configs/StereoMIS/P3_1.yaml --log P3_1 --visualize --track_tool --export_mode all
+# python run.py configs/StereoMIS/P3_1.yaml --log P3_1_all --visualize --track_all --export_mode all
+
+# tool track:
+# python run.py configs/StereoMIS/P3_1.yaml --log P3_1 --visualize --track_ids 1 --export_mode all
+
+# tissue-only track
+# python run.py configs/StereoMIS/P3_1.yaml --log P3_1 --visualize --track_ids 4 5 --export_mode all
+
